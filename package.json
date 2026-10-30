@@ -1,0 +1,63 @@
+{
+  "name": "@mikemajesty/axios-circuit-breaker",
+  "version": "0.1.0",
+  "description": "Circuit breaker utilities for Axios.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "docs/examples.md"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsup",
+    "clean": "tsup --clean",
+    "typecheck": "tsc --noEmit",
+    "test": "npm run typecheck && tsx --test test/*.test.ts",
+    "prepublishOnly": "npm run clean && npm run build"
+  },
+  "keywords": [
+    "axios",
+    "circuit-breaker",
+    "resilience",
+    "typescript"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mikemajesty/axios-circuit-breaker.git"
+  },
+  "bugs": {
+    "url": "https://github.com/mikemajesty/axios-circuit-breaker/issues"
+  },
+  "homepage": "https://github.com/mikemajesty/axios-circuit-breaker#readme",
+  "publishConfig": {
+    "access": "public"
+  },
+  "devDependencies": {
+    "axios": "^1.21.0",
+    "tsup": "^8.5.1",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.3"
+  },
+  "peerDependencies": {
+    "axios": ">=1.6.0 <2"
+  },
+  "dependencies": {
+    "@types/opossum": "^8.1.9",
+    "opossum": "^9.0.0"
+  }
+}
