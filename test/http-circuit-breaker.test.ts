@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import axios, { AxiosError, type AxiosResponse, type InternalAxiosRequestConfig } from "axios";
+import axios, {
+  AxiosError,
+  type AxiosResponse,
+  type InternalAxiosRequestConfig,
+} from "axios";
 import {
   onHttpCircuitClosed,
   onHttpCircuitEvent,
@@ -97,6 +101,57 @@ describe("HttpCircuitBreaker", () => {
     }
 
     assert.equal(await new Client("user").request(42), "user:42");
+  });
+
+  it("supports legacy TypeScript method decorators", async () => {
+    const error = axiosError(503);
+    const fallbackErrors: unknown[] = [];
+
+    class Client {
+      readonly received: string[] = [];
+
+      @onHttpCircuitFailure({ circuitGroup: "legacy" })
+      onFailure(event: CircuitFailureEvent) {
+        assert.equal(event.error, error);
+        this.received.push("failure");
+      }
+
+      @onHttpCircuitEvent({ circuitGroup: "legacy", eventName: "reject" })
+      onReject() {
+        this.received.push("reject");
+      }
+
+      @onHttpCircuitFallback<[string], string>({ circuitGroup: "legacy" })
+      useFallback(event: CircuitFallbackEvent<[string]>): string {
+        fallbackErrors.push(event.err);
+        this.received.push("fallback");
+        return "cached";
+      }
+
+      @HttpCircuitBreaker(
+        breakerOptions<[string]>({
+          circuitGroup: "legacy",
+        }),
+      )
+      async request(_id: string): Promise<string> {
+        throw error;
+      }
+    }
+
+    const client = new Client();
+    assert.equal(await client.request("user-1"), "cached");
+    assert.equal(await client.request("user-2"), "cached");
+    assert.deepEqual(client.received, [
+      "failure",
+      "fallback",
+      "reject",
+      "fallback",
+    ]);
+    assert.equal(fallbackErrors[0], error);
+    assert.equal(
+      (fallbackErrors[1] as Error & { code?: string }).code,
+      "EOPENBREAKER",
+    );
   });
 
   it("disables the Opossum timeout by default and allows explicitly enabling it", async () => {
@@ -220,7 +275,11 @@ describe("HttpCircuitBreaker", () => {
   });
 
   it("does not count cancellations and other 4xx responses", async () => {
-    for (const error of [new axios.CanceledError(), axiosError(400), axiosError(404)]) {
+    for (const error of [
+      new axios.CanceledError(),
+      axiosError(400),
+      axiosError(404),
+    ]) {
       let calls = 0;
 
       class Client {
@@ -250,9 +309,7 @@ describe("HttpCircuitBreaker", () => {
         @HttpCircuitBreaker(
           breakerOptions({
             getErrorCause: (error) =>
-              typeof error === "object" &&
-              error !== null &&
-              "cause" in error
+              typeof error === "object" && error !== null && "cause" in error
                 ? error.cause
                 : error,
           }),
@@ -504,18 +561,19 @@ describe("HttpCircuitBreaker", () => {
       /non-empty circuitGroup/,
     );
 
-    class Client {
-      @onHttpCircuitFallback({ circuitGroup: "duplicate" })
-      firstFallback() {
-        return "first";
-      }
+    assert.throws(() => {
+      class Client {
+        @onHttpCircuitFallback({ circuitGroup: "duplicate" })
+        firstFallback() {
+          return "first";
+        }
 
-      @onHttpCircuitFallback({ circuitGroup: "duplicate" })
-      secondFallback() {
-        return "second";
+        @onHttpCircuitFallback({ circuitGroup: "duplicate" })
+        secondFallback() {
+          return "second";
+        }
       }
-    }
-
-    assert.throws(() => new Client(), /Only one @onHttpCircuitFallback/);
+      return Client;
+    }, /Only one @onHttpCircuitFallback/);
   });
 });

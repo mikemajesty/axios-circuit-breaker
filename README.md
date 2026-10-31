@@ -1,7 +1,7 @@
 # @mikemajesty/axios-circuit-breaker
 
 Circuit breaker for Axios-backed operations, built on Opossum and TypeScript
-standard decorators.
+legacy method decorators.
 
 The package protects async methods, preserves their successful return values
 and original rejections, and optionally provides instance-scoped event
@@ -10,8 +10,7 @@ handlers and fallbacks.
 ## Requirements
 
 - Node.js 20 or later.
-- TypeScript 5 or later with standard decorators. Do not enable
-  `experimentalDecorators` for this API.
+- TypeScript 5 or later with `experimentalDecorators` enabled.
 - Axios `>=1.6.0 <2`.
 
 ## Install

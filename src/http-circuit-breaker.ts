@@ -32,22 +32,25 @@ export function HttpCircuitBreaker<
   Result,
 >(configuration: HttpCircuitBreakerOptions<Args>) {
   if (!configuration.circuitGroup.trim()) {
-    throw new TypeError("HttpCircuitBreaker requires a non-empty circuitGroup.");
+    throw new TypeError(
+      "HttpCircuitBreaker requires a non-empty circuitGroup.",
+    );
   }
 
   return function (
-    originalMethod: AsyncMethod<This, Args, Result>,
-    context: ClassMethodDecoratorContext<
-      This,
-      AsyncMethod<This, Args, Result>
-    >,
-  ): AsyncMethod<This, Args, Result> {
-    if (context.kind !== "method") {
-      throw new TypeError("@HttpCircuitBreaker can only decorate methods.");
+    target: object,
+    propertyKey: string | symbol,
+    descriptor: TypedPropertyDescriptor<AsyncMethod<This, Args, Result>>,
+  ): void {
+    if (typeof target === "function") {
+      throw new TypeError(
+        "@HttpCircuitBreaker can only decorate instance methods.",
+      );
     }
 
-    if (context.static) {
-      throw new TypeError("@HttpCircuitBreaker can only decorate instance methods.");
+    const originalMethod = descriptor.value;
+    if (!originalMethod) {
+      throw new TypeError("@HttpCircuitBreaker can only decorate methods.");
     }
 
     const breakers = new WeakMap<This, Opossum<Args, Result>>();
@@ -55,9 +58,14 @@ export function HttpCircuitBreaker<
     const countAsFailure =
       configuration.shouldCountAsFailure ?? shouldCountAxiosFailure;
 
-    return function (this: This, ...args: Args): Promise<Result> {
-      if ((typeof this !== "object" || this === null) && typeof this !== "function") {
-        throw new TypeError("@HttpCircuitBreaker methods must be called with an instance.");
+    descriptor.value = function (this: This, ...args: Args): Promise<Result> {
+      if (
+        (typeof this !== "object" || this === null) &&
+        typeof this !== "function"
+      ) {
+        throw new TypeError(
+          "@HttpCircuitBreaker methods must be called with an instance.",
+        );
       }
 
       let breaker = breakers.get(this);
@@ -65,7 +73,7 @@ export function HttpCircuitBreaker<
       if (!breaker) {
         const options: Options<Args> = {
           ...configuration.options,
-          name: configuration.options?.name ?? String(context.name),
+          name: configuration.options?.name ?? String(propertyKey),
           group: configuration.options?.group ?? configuration.circuitGroup,
           errorThresholdPercentage:
             configuration.options?.errorThresholdPercentage ??

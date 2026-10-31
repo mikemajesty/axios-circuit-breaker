@@ -1,7 +1,7 @@
 # Examples and behavior
 
 These examples show what the decorators do at runtime. They use TypeScript
-standard decorators; do not enable `experimentalDecorators`.
+legacy decorators, enabled with `experimentalDecorators`.
 
 ## 1. Protecting a request
 

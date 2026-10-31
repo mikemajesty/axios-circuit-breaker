@@ -127,7 +127,9 @@ export type CircuitShutdownEvent = {
 };
 
 /** Payload passed to a fallback handler. */
-export type CircuitFallbackEvent<TArgs extends readonly unknown[] = readonly unknown[]> = {
+export type CircuitFallbackEvent<
+  TArgs extends readonly unknown[] = readonly unknown[],
+> = {
   /** Arguments from the protected call. */
   readonly input: TArgs;
   /** Error that caused the fallback to run. */
@@ -141,19 +143,19 @@ export type CircuitEventPayload<
   TResult = unknown,
 > = EventName extends "success"
   ? CircuitSuccessEvent<TResult>
-    : EventName extends "timeout"
-      ? CircuitTimeoutEvent<TData>
-      : EventName extends "reject"
-        ? CircuitRejectEvent<TData>
-        : EventName extends "fire"
-          ? CircuitFireEvent
-          : EventName extends "cacheHit" | "cacheMiss"
-            ? CircuitCacheEvent
-            : EventName extends "semaphoreLocked"
-              ? CircuitSemaphoreLockedEvent<TData>
-              : EventName extends "healthCheckFailed"
-                ? CircuitHealthCheckFailedEvent<TData>
-                : CircuitShutdownEvent;
+  : EventName extends "timeout"
+    ? CircuitTimeoutEvent<TData>
+    : EventName extends "reject"
+      ? CircuitRejectEvent<TData>
+      : EventName extends "fire"
+        ? CircuitFireEvent
+        : EventName extends "cacheHit" | "cacheMiss"
+          ? CircuitCacheEvent
+          : EventName extends "semaphoreLocked"
+            ? CircuitSemaphoreLockedEvent<TData>
+            : EventName extends "healthCheckFailed"
+              ? CircuitHealthCheckFailedEvent<TData>
+              : CircuitShutdownEvent;
 
 type EventHandler = (payload: unknown) => unknown;
 type FallbackHandler = (payload: CircuitFallbackEvent) => unknown;
@@ -163,7 +165,15 @@ type GroupHandlers = {
   fallback?: FallbackHandler;
 };
 
-const handlersByInstance = new WeakMap<object, Map<string, GroupHandlers>>();
+type LegacyGroupHandlers = {
+  events: Map<string, (string | symbol)[]>;
+  fallback?: string | symbol;
+};
+
+const legacyHandlersByPrototype = new WeakMap<
+  object,
+  Map<string, LegacyGroupHandlers>
+>();
 
 /**
  * Registers a handler for when a circuit opens.
@@ -219,12 +229,11 @@ export function onHttpCircuitEvent<
   EventName extends HttpCircuitEventName,
   TData = unknown,
   TResult = unknown,
->(
-  options: HandlerOptions & { eventName: EventName },
-) {
-  return registerEventHandler<
-    CircuitEventPayload<EventName, TData, TResult>
-  >(options, options.eventName);
+>(options: HandlerOptions & { eventName: EventName }) {
+  return registerEventHandler<CircuitEventPayload<EventName, TData, TResult>>(
+    options,
+    options.eventName,
+  );
 }
 
 /**
@@ -243,15 +252,12 @@ export function onHttpCircuitFallback<
   return registerFallbackHandler<TArgs, TResult>(options);
 }
 
-export function attachHttpCircuitHandlers<
-  Args extends unknown[],
-  Result,
->(
+export function attachHttpCircuitHandlers<Args extends unknown[], Result>(
   breaker: Opossum<Args, Result>,
   instance: object,
   circuitGroup: string,
 ): void {
-  const group = handlersByInstance.get(instance)?.get(circuitGroup);
+  const group = getLegacyGroupHandlers(instance, circuitGroup);
   if (!group) return;
 
   const dispatch = (eventName: string, ...args: unknown[]) => {
@@ -272,26 +278,21 @@ export function attachHttpCircuitHandlers<
   );
   breaker.on("timeout", (error) => dispatch("timeout", error));
   breaker.on("reject", (error) => dispatch("reject", error));
-  breaker.on("halfOpen", (resetTimeout) =>
-    dispatch("halfOpen", resetTimeout),
-  );
+  breaker.on("halfOpen", (resetTimeout) => dispatch("halfOpen", resetTimeout));
   breaker.on("fire", (args) => dispatch("fire", args));
   breaker.on("cacheHit", () => dispatch("cacheHit"));
   breaker.on("cacheMiss", () => dispatch("cacheMiss"));
-  breaker.on("semaphoreLocked", (error) =>
-    dispatch("semaphoreLocked", error),
-  );
+  breaker.on("semaphoreLocked", (error) => dispatch("semaphoreLocked", error));
   breaker.on("healthCheckFailed", (error) =>
     dispatch("healthCheckFailed", error),
   );
   breaker.on("shutdown", () => dispatch("shutdown"));
 
   if (group.fallback) {
-    const fallback = group.fallback;
     breaker.fallback((...args) => {
       const err = args.at(-1);
       const input = args.slice(0, -1);
-      return fallback({ input, err });
+      return group.fallback?.({ input, err });
     });
   }
 }
@@ -302,60 +303,122 @@ function registerEventHandler<Payload>(
 ) {
   validateGroup(options.circuitGroup);
 
-  return function <
-    This extends object,
-  >(
-    _method: (this: This, payload: Payload) => unknown,
-    context: ClassMethodDecoratorContext<This>,
+  return function (
+    target: object,
+    propertyKey: string | symbol,
+    descriptor: PropertyDescriptor,
   ): void {
-    if (context.static) {
-      throw new TypeError("HTTP circuit handlers can only decorate instance methods.");
+    if (typeof target === "function") {
+      throw new TypeError(
+        "HTTP circuit handlers can only decorate instance methods.",
+      );
     }
 
-    context.addInitializer(function (this: This) {
-      const group = getGroupHandlers(this, options.circuitGroup);
-      const handlers = group.events.get(eventName) ?? [];
-      const handler = context.access.get(this) as Function;
-      handlers.push((payload) => Reflect.apply(handler, this, [payload]));
-      group.events.set(eventName, handlers);
-    });
+    if (typeof descriptor.value !== "function") {
+      throw new TypeError("HTTP circuit handlers can only decorate methods.");
+    }
+
+    const group = getLegacyGroupHandlersForPrototype(
+      target,
+      options.circuitGroup,
+    );
+    const handlers = group.events.get(eventName) ?? [];
+    handlers.push(propertyKey);
+    group.events.set(eventName, handlers);
   };
 }
 
-function registerFallbackHandler<
-  TArgs extends readonly unknown[],
-  TResult,
->(options: HandlerOptions) {
-  return function <This extends object>(
-    _method: (
-      this: This,
-      payload: CircuitFallbackEvent<TArgs>,
-    ) => TResult | Promise<TResult>,
-    context: ClassMethodDecoratorContext<This>,
+function registerFallbackHandler<TArgs extends readonly unknown[], TResult>(
+  options: HandlerOptions,
+) {
+  return function (
+    target: object,
+    propertyKey: string | symbol,
+    descriptor: PropertyDescriptor,
   ): void {
-    if (context.static) {
-      throw new TypeError("HTTP circuit handlers can only decorate instance methods.");
+    if (typeof target === "function") {
+      throw new TypeError(
+        "HTTP circuit handlers can only decorate instance methods.",
+      );
     }
 
-    context.addInitializer(function (this: This) {
-      const group = getGroupHandlers(this, options.circuitGroup);
-      if (group.fallback) {
+    if (typeof descriptor.value !== "function") {
+      throw new TypeError("HTTP circuit handlers can only decorate methods.");
+    }
+
+    const group = getLegacyGroupHandlersForPrototype(
+      target,
+      options.circuitGroup,
+    );
+    if (group.fallback !== undefined) {
+      throw new TypeError(
+        `Only one @onHttpCircuitFallback handler is allowed for circuitGroup "${options.circuitGroup}".`,
+      );
+    }
+
+    group.fallback = propertyKey;
+  };
+}
+
+function getLegacyGroupHandlers(
+  instance: object,
+  circuitGroup: string,
+): GroupHandlers | undefined {
+  const prototypes: object[] = [];
+  let prototype = Object.getPrototypeOf(instance) as object | null;
+  while (prototype && prototype !== Object.prototype) {
+    prototypes.push(prototype);
+    prototype = Object.getPrototypeOf(prototype) as object | null;
+  }
+
+  let group: GroupHandlers | undefined;
+  let fallback: FallbackHandler | undefined;
+  for (const currentPrototype of prototypes.reverse()) {
+    const legacyGroup = legacyHandlersByPrototype
+      .get(currentPrototype)
+      ?.get(circuitGroup);
+    if (!legacyGroup) continue;
+
+    group ??= { events: new Map() };
+    for (const [eventName, propertyKeys] of legacyGroup.events) {
+      const handlers = group.events.get(eventName) ?? [];
+      for (const propertyKey of propertyKeys) {
+        handlers.push((payload) =>
+          Reflect.apply(Reflect.get(instance, propertyKey), instance, [
+            payload,
+          ]),
+        );
+      }
+      group.events.set(eventName, handlers);
+    }
+
+    if (legacyGroup.fallback !== undefined) {
+      if (fallback) {
         throw new TypeError(
-          `Only one @onHttpCircuitFallback handler is allowed for circuitGroup "${options.circuitGroup}".`,
+          `Only one @onHttpCircuitFallback handler is allowed for circuitGroup "${circuitGroup}".`,
         );
       }
 
-      const handler = context.access.get(this) as Function;
-      group.fallback = (payload) => Reflect.apply(handler, this, [payload]);
-    });
-  };
+      const propertyKey = legacyGroup.fallback;
+      fallback = (payload) =>
+        Reflect.apply(Reflect.get(instance, propertyKey), instance, [payload]);
+    }
+  }
+
+  if (group && fallback) {
+    group.fallback = fallback;
+  }
+  return group;
 }
 
-function getGroupHandlers(instance: object, circuitGroup: string): GroupHandlers {
-  let groups = handlersByInstance.get(instance);
+function getLegacyGroupHandlersForPrototype(
+  prototype: object,
+  circuitGroup: string,
+): LegacyGroupHandlers {
+  let groups = legacyHandlersByPrototype.get(prototype);
   if (!groups) {
     groups = new Map();
-    handlersByInstance.set(instance, groups);
+    legacyHandlersByPrototype.set(prototype, groups);
   }
 
   let group = groups.get(circuitGroup);
@@ -459,6 +522,8 @@ function getAxiosError<TData = unknown>(
 
 function validateGroup(circuitGroup: string): void {
   if (!circuitGroup.trim()) {
-    throw new TypeError("HTTP circuit handlers require a non-empty circuitGroup.");
+    throw new TypeError(
+      "HTTP circuit handlers require a non-empty circuitGroup.",
+    );
   }
 }
