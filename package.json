@@ -1,6 +1,6 @@
 {
   "name": "@mikemajesty/axios-circuit-breaker",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Circuit breaker utilities for Axios.",
   "license": "MIT",
   "type": "module",
