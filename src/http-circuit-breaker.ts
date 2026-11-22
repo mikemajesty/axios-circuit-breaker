@@ -13,42 +13,38 @@ const DEFAULT_TIMEOUT = false;
 
 /**
  * Decides whether an error contributes to the circuit breaker's failure
- * statistics. Return `false` to ignore the error for circuit-state purposes;
- * the original rejection is still returned to the caller.
+ * statistics. Returning `false` filters the error from failure accounting.
+ *
+ * Opossum emits `success` for filtered errors, but still rejects `fire()` with
+ * the original error. This preserves the caller's rejection while preventing
+ * the error from incrementing the breaker's failure count.
  */
 export type ShouldCountAsFailure = (error: unknown) => boolean;
 
 /**
- * Extracts the underlying error used for failure classification. This does
- * not replace the error returned to the caller or included in failure events.
+ * Extracts the error used for classification. The extracted value does not
+ * replace the original error returned to the caller or sent to event handlers.
  */
 export type GetErrorCause = (error: unknown) => unknown;
 
-/**
- * Configuration for {@link HttpCircuitBreaker}.
- */
+/** Configuration for {@link HttpCircuitBreaker}. */
 export type HttpCircuitBreakerOptions<Args extends unknown[]> = {
   /**
-   * Required group name connecting this method to event and fallback
-   * decorators on the same instance. It does not share breaker state.
+   * Connects this breaker to event and fallback decorators on the same
+   * instance. It does not share breaker state.
    */
   circuitGroup: string;
-  /**
-   * Opossum options for this breaker. `errorFilter` is managed internally and
-   * cannot be overridden. Defaults include a 20% error threshold, a
-   * five-call volume threshold, a 5-second rolling window, and a 2.5-second
-   * reset timeout. The Opossum timeout is disabled unless configured.
-   */
+
+  /** Opossum options. `errorFilter` is managed internally. */
   options?: Omit<Options<Args>, "errorFilter">;
-  /**
-   * Extracts a wrapped error before applying the default Axios failure policy
-   * or the configured `shouldCountAsFailure` function.
-   */
+
+  /** Extracts a wrapped error before applying the failure policy. */
   getErrorCause?: GetErrorCause;
+
   /**
-   * Overrides the default failure policy. By default, network errors, HTTP
-   * 408, 429, and 5xx responses count as failures; cancellations and other
-   * 4xx responses do not.
+   * Replaces the default policy. By default, transport errors and HTTP 5xx
+   * responses count as failures; cancellations and HTTP 1xx–4xx responses do
+   * not.
    */
   shouldCountAsFailure?: ShouldCountAsFailure;
 };
@@ -59,25 +55,31 @@ type AsyncMethod<This extends object, Args extends unknown[], Result> = (
 ) => Promise<Result>;
 
 /**
- * Protects an instance method with an Opossum circuit breaker.
+ * Protects an asynchronous instance method with an Opossum circuit breaker.
+ * Breaker state is isolated per decorated method and per instance.
  *
- * Supports TypeScript legacy method decorators (`experimentalDecorators`).
- * Breaker state is isolated per decorated method and per instance. Successful
- * results and original rejections are preserved; without a fallback, a
- * rejected call remains rejected.
- *
- * @param configuration Breaker behavior and event-handler group configuration.
+ * Successful values and original rejections are preserved unless a registered
+ * fallback handles the rejection. The decorator supports TypeScript legacy
+ * method decorators (`experimentalDecorators`).
  */
 export function HttpCircuitBreaker<
   This extends object,
   Args extends unknown[],
   Result,
 >(configuration: HttpCircuitBreakerOptions<Args>) {
-  if (!configuration.circuitGroup.trim()) {
+  const circuitGroup = configuration.circuitGroup;
+
+  if (typeof circuitGroup !== "string" || circuitGroup.trim().length === 0) {
     throw new TypeError(
       "HttpCircuitBreaker requires a non-empty circuitGroup.",
     );
   }
+
+  // Capture configuration when the decorator is created, not on the first call.
+  const configuredOptions = { ...configuration.options };
+  const getErrorCause = configuration.getErrorCause ?? identity;
+  const shouldCountAsFailure =
+    configuration.shouldCountAsFailure ?? shouldCountAxiosFailure;
 
   return function (
     target: object,
@@ -91,19 +93,20 @@ export function HttpCircuitBreaker<
     }
 
     const originalMethod = descriptor.value;
-    if (!originalMethod) {
+
+    if (typeof originalMethod !== "function") {
       throw new TypeError("@HttpCircuitBreaker can only decorate methods.");
     }
 
     const breakers = new WeakMap<This, Opossum<Args, Result>>();
-    const getErrorCause = configuration.getErrorCause ?? identity;
-    const countAsFailure =
-      configuration.shouldCountAsFailure ?? shouldCountAxiosFailure;
 
-    descriptor.value = function (this: This, ...args: Args): Promise<Result> {
+    descriptor.value = function (
+      this: This,
+      ...args: Args
+    ): Promise<Result> {
       if (
-        (typeof this !== "object" || this === null) &&
-        typeof this !== "function"
+        this === null ||
+        (typeof this !== "object" && typeof this !== "function")
       ) {
         throw new TypeError(
           "@HttpCircuitBreaker methods must be called with an instance.",
@@ -114,31 +117,48 @@ export function HttpCircuitBreaker<
 
       if (!breaker) {
         const options: Options<Args> = {
-          ...configuration.options,
-          name: configuration.options?.name ?? String(propertyKey),
-          group: configuration.options?.group ?? configuration.circuitGroup,
+          ...configuredOptions,
+          name: configuredOptions.name ?? String(propertyKey),
+          group: configuredOptions.group ?? circuitGroup,
           errorThresholdPercentage:
-            configuration.options?.errorThresholdPercentage ??
+            configuredOptions.errorThresholdPercentage ??
             DEFAULT_ERROR_THRESHOLD_PERCENTAGE,
           volumeThreshold:
-            configuration.options?.volumeThreshold ?? DEFAULT_VOLUME_THRESHOLD,
+            configuredOptions.volumeThreshold ?? DEFAULT_VOLUME_THRESHOLD,
           rollingCountTimeout:
-            configuration.options?.rollingCountTimeout ??
+            configuredOptions.rollingCountTimeout ??
             DEFAULT_ROLLING_COUNT_TIMEOUT,
           resetTimeout:
-            configuration.options?.resetTimeout ?? DEFAULT_RESET_TIMEOUT,
+            configuredOptions.resetTimeout ?? DEFAULT_RESET_TIMEOUT,
           allowWarmUp:
-            configuration.options?.allowWarmUp ?? DEFAULT_ALLOW_WARM_UP,
-          timeout: configuration.options?.timeout ?? DEFAULT_TIMEOUT,
-          errorFilter: (error) => !countAsFailure(getErrorCause(error)),
+            configuredOptions.allowWarmUp ?? DEFAULT_ALLOW_WARM_UP,
+          timeout: configuredOptions.timeout ?? DEFAULT_TIMEOUT,
+
+          // Opossum returns true when an error must be excluded from failure
+          // accounting. Do not invert this predicate.
+          errorFilter: (error) =>
+            shouldIgnoreFailure(
+              error,
+              getErrorCause,
+              shouldCountAsFailure,
+            ),
         };
 
-        breaker = new Opossum<Args, Result>(
+        const createdBreaker = new Opossum<Args, Result>(
           (...currentArgs) => originalMethod.apply(this, currentArgs),
           options,
         );
-        attachHttpCircuitHandlers(breaker, this, configuration.circuitGroup);
-        breakers.set(this, breaker);
+
+        try {
+          attachHttpCircuitHandlers(createdBreaker, this, circuitGroup);
+        } catch (error) {
+          // Preserve the asynchronous method contract when handler resolution
+          // fails (for example, duplicate fallback decorators in inheritance).
+          return Promise.reject(error);
+        }
+
+        breakers.set(this, createdBreaker);
+        breaker = createdBreaker;
       }
 
       return breaker.fire(...args);
@@ -150,6 +170,33 @@ function identity(value: unknown): unknown {
   return value;
 }
 
+/**
+ * Returns true when an operation error should be excluded from failure
+ * accounting. If extraction or classification throws, the original operation
+ * is counted as a failure.
+ */
+function shouldIgnoreFailure(
+  error: unknown,
+  getErrorCause: GetErrorCause,
+  shouldCountAsFailure: ShouldCountAsFailure,
+): boolean {
+  try {
+    return !shouldCountAsFailure(getErrorCause(error));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Default HTTP dependency-health policy:
+ * - transport/network errors count as failures;
+ * - HTTP 5xx responses count as failures;
+ * - cancellations and all other HTTP statuses do not.
+ *
+ * Retryability is a separate policy. In particular, 408 and 429 are not
+ * automatically counted by the circuit breaker merely because they may be
+ * retryable in some applications.
+ */
 function shouldCountAxiosFailure(error: unknown): boolean {
   if (axios.isCancel(error)) {
     return false;
@@ -160,9 +207,11 @@ function shouldCountAxiosFailure(error: unknown): boolean {
   }
 
   const status = error.response?.status;
+
+  // No HTTP response generally means a transport-level failure or timeout.
   if (status === undefined) {
     return true;
   }
 
-  return status === 408 || status === 429 || (status >= 500 && status <= 599);
+  return status >= 500 && status <= 599;
 }

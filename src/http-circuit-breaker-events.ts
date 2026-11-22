@@ -1,16 +1,9 @@
 import axios, { type AxiosError } from "axios";
 import type Opossum from "opossum";
 
-type HandlerOptions = {
-  circuitGroup: string;
-};
+type HandlerOptions = { circuitGroup: string };
 
-/**
- * Event names supported by {@link onHttpCircuitEvent}.
- *
- * State-transition events (`open`, `close`, `halfOpen`) and `failure` have
- * dedicated decorators.
- */
+/** Opossum events exposed by the generic event decorator. */
 export type HttpCircuitEventName =
   | "success"
   | "timeout"
@@ -22,127 +15,74 @@ export type HttpCircuitEventName =
   | "healthCheckFailed"
   | "shutdown";
 
-/** Payload emitted when the circuit opens and starts rejecting calls. */
-export type CircuitOpenEvent = {
-  /** Group configured on the protected method. */
-  readonly circuitGroup: string;
-};
+export type CircuitOpenEvent = { readonly circuitGroup: string };
+export type CircuitClosedEvent = { readonly circuitGroup: string };
 
-/** Payload emitted when the circuit closes and allows calls normally. */
-export type CircuitClosedEvent = {
-  /** Group configured on the protected method. */
+/** `result` is unknown because Opossum also emits `success` for filtered errors. */
+export type CircuitSuccessEvent = {
   readonly circuitGroup: string;
-};
-
-/** Payload emitted after a protected call succeeds. */
-export type CircuitSuccessEvent<TResult = unknown> = {
-  /** Group configured on the protected method. */
-  readonly circuitGroup: string;
-  /** Value returned by the protected call. */
-  readonly result: TResult;
-  /** Time taken by the protected call, in milliseconds. */
+  readonly result: unknown;
   readonly latencyMs: number;
 };
 
-/** Payload emitted when a protected call fails and the breaker records it as a failure. */
 export type CircuitFailureEvent<TData = unknown> = {
-  /** Group configured on the protected method. */
   readonly circuitGroup: string;
-  /** Error rejected by the protected call. */
   readonly error: unknown;
-  /** The error as an Axios error, when it is one. */
   readonly axiosError?: AxiosError<TData>;
-  /** Time taken before the protected call failed, in milliseconds. */
   readonly latencyMs: number;
-  /** Arguments passed to the protected method. */
   readonly args: readonly unknown[];
 };
 
-/** Payload emitted when the breaker's configured timeout is reached. */
 export type CircuitTimeoutEvent<TData = unknown> = {
-  /** Group configured on the protected method. */
   readonly circuitGroup: string;
-  /** Timeout error. */
   readonly error: unknown;
-  /** The error as an Axios error, when it is one. */
   readonly axiosError?: AxiosError<TData>;
 };
 
-/** Payload emitted when a call is rejected because the circuit is open. */
 export type CircuitRejectEvent<TData = unknown> = {
-  /** Group configured on the protected method. */
   readonly circuitGroup: string;
-  /** Rejection error. */
   readonly error: unknown;
-  /** The error as an Axios error, when it is one. */
   readonly axiosError?: AxiosError<TData>;
 };
 
-/** Payload emitted when the reset period ends and the circuit enters half-open state. */
 export type CircuitHalfOpenEvent = {
-  /** Group configured on the protected method. */
   readonly circuitGroup: string;
-  /** Configured reset period, in milliseconds. */
   readonly resetTimeout: number;
 };
 
-/** Payload emitted whenever a call is submitted to the circuit breaker. */
 export type CircuitFireEvent = {
-  /** Group configured on the protected method. */
   readonly circuitGroup: string;
-  /** Arguments passed to the protected method. */
   readonly args: readonly unknown[];
 };
 
-/** Payload emitted for cache-hit and cache-miss events. */
-export type CircuitCacheEvent = {
-  /** Group configured on the protected method. */
-  readonly circuitGroup: string;
-};
+export type CircuitCacheEvent = { readonly circuitGroup: string };
 
-/** Payload emitted when the breaker's concurrency limit prevents a call. */
 export type CircuitSemaphoreLockedEvent<TData = unknown> = {
-  /** Group configured on the protected method. */
   readonly circuitGroup: string;
-  /** Semaphore error. */
   readonly error: unknown;
-  /** The error as an Axios error, when it is one. */
   readonly axiosError?: AxiosError<TData>;
 };
 
-/** Payload emitted when a configured health check fails. */
 export type CircuitHealthCheckFailedEvent<TData = unknown> = {
-  /** Group configured on the protected method. */
   readonly circuitGroup: string;
-  /** Health-check error. */
   readonly error: unknown;
-  /** The error as an Axios error, when it is one. */
   readonly axiosError?: AxiosError<TData>;
 };
 
-/** Payload emitted when the circuit breaker is shut down. */
-export type CircuitShutdownEvent = {
-  /** Group configured on the protected method. */
-  readonly circuitGroup: string;
-};
+export type CircuitShutdownEvent = { readonly circuitGroup: string };
 
-/** Payload passed to a fallback handler. */
 export type CircuitFallbackEvent<
   TArgs extends readonly unknown[] = readonly unknown[],
 > = {
-  /** Arguments from the protected call. */
   readonly input: TArgs;
-  /** Error that caused the fallback to run. */
   readonly err: unknown;
 };
 
-/** Resolves an event name to the payload type delivered to its handler. */
 export type CircuitEventPayload<
   EventName extends HttpCircuitEventName,
   TData = unknown,
-  TResult = unknown,
 > = EventName extends "success"
-  ? CircuitSuccessEvent<TResult>
+  ? CircuitSuccessEvent
   : EventName extends "timeout"
     ? CircuitTimeoutEvent<TData>
     : EventName extends "reject"
@@ -159,200 +99,55 @@ export type CircuitEventPayload<
 
 type EventHandler = (payload: unknown) => unknown;
 type FallbackHandler = (payload: CircuitFallbackEvent) => unknown;
-
 type GroupHandlers = {
   events: Map<string, EventHandler[]>;
   fallback?: FallbackHandler;
 };
-
-type LegacyGroupHandlers = {
+type PrototypeHandlers = {
   events: Map<string, (string | symbol)[]>;
   fallback?: string | symbol;
 };
 
-const legacyHandlersByPrototype = new WeakMap<
-  object,
-  Map<string, LegacyGroupHandlers>
->();
+const handlersByPrototype = new WeakMap<object, Map<string, PrototypeHandlers>>();
 
-/**
- * Registers a handler for when a circuit opens.
- *
- * Decorate an instance method that accepts a {@link CircuitOpenEvent}. The
- * handler is associated with the same `circuitGroup` on that instance.
- */
 export function onHttpCircuitOpen(options: HandlerOptions) {
-  return registerEventHandler<CircuitOpenEvent>(options, "open");
+  return registerEventHandler(options, "open");
 }
 
-/**
- * Registers a handler for when a circuit closes.
- *
- * Decorate an instance method that accepts a {@link CircuitClosedEvent}. The
- * handler is associated with the same `circuitGroup` on that instance.
- */
 export function onHttpCircuitClosed(options: HandlerOptions) {
-  return registerEventHandler<CircuitClosedEvent>(options, "close");
+  return registerEventHandler(options, "close");
 }
 
-/**
- * Registers a handler for failures recorded by the circuit breaker.
- *
- * Decorate an instance method that accepts a {@link CircuitFailureEvent}.
- * Unlike `reject`, this event describes a failed protected call, not a call
- * blocked because the circuit is already open.
- */
-export function onHttpCircuitFailure<TData = unknown>(options: HandlerOptions) {
-  return registerEventHandler<CircuitFailureEvent<TData>>(options, "failure");
+export function onHttpCircuitFailure(options: HandlerOptions) {
+  return registerEventHandler(options, "failure");
 }
 
-/**
- * Registers a handler for when the reset period ends and the circuit becomes
- * half-open, allowing a trial call.
- *
- * Decorate an instance method that accepts a {@link CircuitHalfOpenEvent}.
- */
 export function onHttpCircuitHalfOpen(options: HandlerOptions) {
-  return registerEventHandler<CircuitHalfOpenEvent>(options, "halfOpen");
+  return registerEventHandler(options, "halfOpen");
 }
 
-/**
- * Registers a handler for a supported Opossum event that does not have a
- * dedicated decorator.
- *
- * Decorate an instance method whose argument matches the payload for
- * `eventName`. The handler is associated with the same `circuitGroup` on that
- * instance. Use the dedicated decorators for `open`, `close`, `halfOpen`, and
- * `failure`.
- */
-export function onHttpCircuitEvent<
-  EventName extends HttpCircuitEventName,
-  TData = unknown,
-  TResult = unknown,
->(options: HandlerOptions & { eventName: EventName }) {
-  return registerEventHandler<CircuitEventPayload<EventName, TData, TResult>>(
-    options,
-    options.eventName,
-  );
-}
-
-/**
- * Registers a fallback for failures in the specified group on this instance.
- *
- * The handler receives the protected method's arguments in `input` and the
- * triggering error in `err`. Only one fallback may be registered for each
- * `circuitGroup` on an instance.
- */
-export function onHttpCircuitFallback<
-  TArgs extends readonly unknown[] = readonly unknown[],
-  TResult = unknown,
->(options: HandlerOptions) {
-  validateGroup(options.circuitGroup);
-
-  return registerFallbackHandler<TArgs, TResult>(options);
-}
-
-export function attachHttpCircuitHandlers<Args extends unknown[], Result>(
-  breaker: Opossum<Args, Result>,
-  instance: object,
-  circuitGroup: string,
-): void {
-  const group = getLegacyGroupHandlers(instance, circuitGroup);
-  if (!group) return;
-
-  const dispatch = (eventName: string, ...args: unknown[]) => {
-    const handlers = group.events.get(eventName) ?? [];
-    const payload = createEventPayload(circuitGroup, eventName, args);
-    for (const handler of handlers) {
-      handler(payload);
-    }
-  };
-
-  breaker.on("open", () => dispatch("open"));
-  breaker.on("close", () => dispatch("close"));
-  breaker.on("success", (result, latencyMs) =>
-    dispatch("success", result, latencyMs),
-  );
-  breaker.on("failure", (error, latencyMs, args) =>
-    dispatch("failure", error, latencyMs, args),
-  );
-  breaker.on("timeout", (error) => dispatch("timeout", error));
-  breaker.on("reject", (error) => dispatch("reject", error));
-  breaker.on("halfOpen", (resetTimeout) => dispatch("halfOpen", resetTimeout));
-  breaker.on("fire", (args) => dispatch("fire", args));
-  breaker.on("cacheHit", () => dispatch("cacheHit"));
-  breaker.on("cacheMiss", () => dispatch("cacheMiss"));
-  breaker.on("semaphoreLocked", (error) => dispatch("semaphoreLocked", error));
-  breaker.on("healthCheckFailed", (error) =>
-    dispatch("healthCheckFailed", error),
-  );
-  breaker.on("shutdown", () => dispatch("shutdown"));
-
-  if (group.fallback) {
-    breaker.fallback((...args) => {
-      const err = args.at(-1);
-      const input = args.slice(0, -1);
-      return group.fallback?.({ input, err });
-    });
-  }
-}
-
-function registerEventHandler<Payload>(
-  options: HandlerOptions,
-  eventName: string,
+/** Registers a handler for a supported Opossum event without a dedicated decorator. */
+export function onHttpCircuitEvent<EventName extends HttpCircuitEventName>(
+  options: HandlerOptions & { eventName: EventName },
 ) {
-  validateGroup(options.circuitGroup);
+  return registerEventHandler(options, options.eventName);
+}
+
+/** Registers the single fallback allowed for a group on an instance. */
+export function onHttpCircuitFallback(options: HandlerOptions) {
+  const circuitGroup = validateGroup(options.circuitGroup);
 
   return function (
     target: object,
     propertyKey: string | symbol,
     descriptor: PropertyDescriptor,
   ): void {
-    if (typeof target === "function") {
-      throw new TypeError(
-        "HTTP circuit handlers can only decorate instance methods.",
-      );
-    }
+    assertInstanceMethod(target, descriptor);
+    const group = getPrototypeGroup(target, circuitGroup);
 
-    if (typeof descriptor.value !== "function") {
-      throw new TypeError("HTTP circuit handlers can only decorate methods.");
-    }
-
-    const group = getLegacyGroupHandlersForPrototype(
-      target,
-      options.circuitGroup,
-    );
-    const handlers = group.events.get(eventName) ?? [];
-    handlers.push(propertyKey);
-    group.events.set(eventName, handlers);
-  };
-}
-
-function registerFallbackHandler<TArgs extends readonly unknown[], TResult>(
-  options: HandlerOptions,
-) {
-  return function (
-    target: object,
-    propertyKey: string | symbol,
-    descriptor: PropertyDescriptor,
-  ): void {
-    if (typeof target === "function") {
-      throw new TypeError(
-        "HTTP circuit handlers can only decorate instance methods.",
-      );
-    }
-
-    if (typeof descriptor.value !== "function") {
-      throw new TypeError("HTTP circuit handlers can only decorate methods.");
-    }
-
-    const group = getLegacyGroupHandlersForPrototype(
-      target,
-      options.circuitGroup,
-    );
     if (group.fallback !== undefined) {
       throw new TypeError(
-        `Only one @onHttpCircuitFallback handler is allowed for circuitGroup "${options.circuitGroup}".`,
+        `Only one @onHttpCircuitFallback handler is allowed for circuitGroup "${circuitGroup}".`,
       );
     }
 
@@ -360,65 +155,128 @@ function registerFallbackHandler<TArgs extends readonly unknown[], TResult>(
   };
 }
 
-function getLegacyGroupHandlers(
+/** Attaches handlers registered on the instance's prototype chain to a breaker. */
+export function attachHttpCircuitHandlers<Args extends unknown[], Result>(
+  breaker: Opossum<Args, Result>,
+  instance: object,
+  circuitGroup: string,
+): void {
+  const handlers = resolveInstanceHandlers(instance, circuitGroup);
+  if (!handlers) return;
+
+  const dispatch = (eventName: string, ...eventArgs: unknown[]) => {
+    const listeners = handlers.events.get(eventName);
+    if (!listeners?.length) return;
+
+    const payload = createEventPayload(circuitGroup, eventName, eventArgs);
+    for (const listener of listeners) listener(payload);
+  };
+
+  breaker.on("open", () => dispatch("open"));
+  breaker.on("close", () => dispatch("close"));
+  breaker.on("success", (result: unknown, latency: number) =>
+    dispatch("success", result, latency),
+  );
+  breaker.on("failure", (error: unknown, latency: number, args: unknown[]) =>
+    dispatch("failure", error, latency, args),
+  );
+  breaker.on("timeout", (error: unknown) => dispatch("timeout", error));
+  breaker.on("reject", (error: unknown) => dispatch("reject", error));
+  breaker.on("halfOpen", (resetTimeout: number) =>
+    dispatch("halfOpen", resetTimeout),
+  );
+  breaker.on("fire", (args: unknown[]) => dispatch("fire", args));
+  breaker.on("cacheHit", () => dispatch("cacheHit"));
+  breaker.on("cacheMiss", () => dispatch("cacheMiss"));
+  breaker.on("semaphoreLocked", (error: unknown) =>
+    dispatch("semaphoreLocked", error),
+  );
+  breaker.on("healthCheckFailed", (error: unknown) =>
+    dispatch("healthCheckFailed", error),
+  );
+  breaker.on("shutdown", () => dispatch("shutdown"));
+
+  if (handlers.fallback) {
+    const fallback = handlers.fallback;
+    breaker.fallback((...fallbackArgs: unknown[]) => {
+      const err = fallbackArgs.at(-1);
+      const input = fallbackArgs.slice(0, -1);
+      return fallback({ input, err });
+    });
+  }
+}
+
+function registerEventHandler(options: HandlerOptions, eventName: string) {
+  const circuitGroup = validateGroup(options.circuitGroup);
+
+  return function (
+    target: object,
+    propertyKey: string | symbol,
+    descriptor: PropertyDescriptor,
+  ): void {
+    assertInstanceMethod(target, descriptor);
+    const group = getPrototypeGroup(target, circuitGroup);
+    const properties = group.events.get(eventName) ?? [];
+    properties.push(propertyKey);
+    group.events.set(eventName, properties);
+  };
+}
+
+function resolveInstanceHandlers(
   instance: object,
   circuitGroup: string,
 ): GroupHandlers | undefined {
-  const prototypes: object[] = [];
+  const chain: object[] = [];
   let prototype = Object.getPrototypeOf(instance) as object | null;
+
   while (prototype && prototype !== Object.prototype) {
-    prototypes.push(prototype);
+    chain.push(prototype);
     prototype = Object.getPrototypeOf(prototype) as object | null;
   }
 
-  let group: GroupHandlers | undefined;
+  let resolved: GroupHandlers | undefined;
   let fallback: FallbackHandler | undefined;
-  for (const currentPrototype of prototypes.reverse()) {
-    const legacyGroup = legacyHandlersByPrototype
-      .get(currentPrototype)
-      ?.get(circuitGroup);
-    if (!legacyGroup) continue;
 
-    group ??= { events: new Map() };
-    for (const [eventName, propertyKeys] of legacyGroup.events) {
-      const handlers = group.events.get(eventName) ?? [];
+  for (const currentPrototype of chain.reverse()) {
+    const registered = handlersByPrototype.get(currentPrototype)?.get(circuitGroup);
+    if (!registered) continue;
+
+    resolved ??= { events: new Map() };
+
+    for (const [eventName, propertyKeys] of registered.events) {
+      const listeners = resolved.events.get(eventName) ?? [];
       for (const propertyKey of propertyKeys) {
-        handlers.push((payload) =>
-          Reflect.apply(Reflect.get(instance, propertyKey), instance, [
-            payload,
-          ]),
+        listeners.push((payload) =>
+          Reflect.apply(Reflect.get(instance, propertyKey), instance, [payload]),
         );
       }
-      group.events.set(eventName, handlers);
+      resolved.events.set(eventName, listeners);
     }
 
-    if (legacyGroup.fallback !== undefined) {
+    if (registered.fallback !== undefined) {
       if (fallback) {
         throw new TypeError(
-          `Only one @onHttpCircuitFallback handler is allowed for circuitGroup "${circuitGroup}".`,
+          `Only one @onHttpCircuitFallback handler is allowed for circuitGroup "${circuitGroup}" across an inheritance chain.`,
         );
       }
-
-      const propertyKey = legacyGroup.fallback;
+      const propertyKey = registered.fallback;
       fallback = (payload) =>
         Reflect.apply(Reflect.get(instance, propertyKey), instance, [payload]);
     }
   }
 
-  if (group && fallback) {
-    group.fallback = fallback;
-  }
-  return group;
+  if (resolved && fallback) resolved.fallback = fallback;
+  return resolved;
 }
 
-function getLegacyGroupHandlersForPrototype(
+function getPrototypeGroup(
   prototype: object,
   circuitGroup: string,
-): LegacyGroupHandlers {
-  let groups = legacyHandlersByPrototype.get(prototype);
+): PrototypeHandlers {
+  let groups = handlersByPrototype.get(prototype);
   if (!groups) {
     groups = new Map();
-    legacyHandlersByPrototype.set(prototype, groups);
+    handlersByPrototype.set(prototype, groups);
   }
 
   let group = groups.get(circuitGroup);
@@ -426,7 +284,6 @@ function getLegacyGroupHandlersForPrototype(
     group = { events: new Map() };
     groups.set(circuitGroup, group);
   }
-
   return group;
 }
 
@@ -435,95 +292,89 @@ function createEventPayload(
   eventName: string,
   args: unknown[],
 ): unknown {
+  const errorPayload = () => ({
+    circuitGroup,
+    error: args[0],
+    axiosError: asAxiosError(args[0]),
+  });
+
   switch (eventName) {
     case "open":
-      return { circuitGroup } satisfies CircuitOpenEvent;
     case "close":
-      return { circuitGroup } satisfies CircuitClosedEvent;
+    case "cacheHit":
+    case "cacheMiss":
+    case "shutdown":
+      return { circuitGroup };
     case "success":
       return {
         circuitGroup,
         result: args[0],
-        latencyMs: readNumber(args[1]),
+        latencyMs: requireNumber(args[1], eventName),
       } satisfies CircuitSuccessEvent;
     case "failure":
       return {
-        circuitGroup,
-        error: args[0],
-        axiosError: getAxiosError(args[0]),
-        latencyMs: readNumber(args[1]),
-        args: readArray(args[2]),
+        ...errorPayload(),
+        latencyMs: requireNumber(args[1], eventName),
+        args: requireArray(args[2], eventName),
       } satisfies CircuitFailureEvent;
     case "timeout":
-      return {
-        circuitGroup,
-        error: args[0],
-        axiosError: getAxiosError(args[0]),
-      } satisfies CircuitTimeoutEvent;
+      return errorPayload() satisfies CircuitTimeoutEvent;
     case "reject":
-      return {
-        circuitGroup,
-        error: args[0],
-        axiosError: getAxiosError(args[0]),
-      } satisfies CircuitRejectEvent;
+      return errorPayload() satisfies CircuitRejectEvent;
     case "halfOpen":
       return {
         circuitGroup,
-        resetTimeout: readNumber(args[0]),
+        resetTimeout: requireNumber(args[0], eventName),
       } satisfies CircuitHalfOpenEvent;
     case "fire":
       return {
         circuitGroup,
-        args: readArray(args[0]),
+        args: requireArray(args[0], eventName),
       } satisfies CircuitFireEvent;
-    case "cacheHit":
-    case "cacheMiss":
-      return { circuitGroup } satisfies CircuitCacheEvent;
     case "semaphoreLocked":
-      return {
-        circuitGroup,
-        error: args[0],
-        axiosError: getAxiosError(args[0]),
-      } satisfies CircuitSemaphoreLockedEvent;
+      return errorPayload() satisfies CircuitSemaphoreLockedEvent;
     case "healthCheckFailed":
-      return {
-        circuitGroup,
-        error: args[0],
-        axiosError: getAxiosError(args[0]),
-      } satisfies CircuitHealthCheckFailedEvent;
-    case "shutdown":
-      return { circuitGroup } satisfies CircuitShutdownEvent;
+      return errorPayload() satisfies CircuitHealthCheckFailedEvent;
     default:
       throw new TypeError(`Unsupported circuit event "${eventName}".`);
   }
 }
 
-function readNumber(value: unknown): number {
-  if (typeof value !== "number") {
-    throw new TypeError("Opossum emitted an event without a numeric value.");
-  }
-
-  return value;
-}
-
-function readArray(value: unknown): readonly unknown[] {
-  if (!Array.isArray(value)) {
-    throw new TypeError("Opossum emitted an event without an argument array.");
-  }
-
-  return value;
-}
-
-function getAxiosError<TData = unknown>(
+function asAxiosError<TData = unknown>(
   error: unknown,
 ): AxiosError<TData> | undefined {
   return axios.isAxiosError<TData>(error) ? error : undefined;
 }
 
-function validateGroup(circuitGroup: string): void {
-  if (!circuitGroup.trim()) {
-    throw new TypeError(
-      "HTTP circuit handlers require a non-empty circuitGroup.",
-    );
+function requireNumber(value: unknown, eventName: string): number {
+  if (typeof value !== "number") {
+    throw new TypeError(`Opossum emitted ${eventName} without a numeric value.`);
   }
+  return value;
+}
+
+function requireArray(value: unknown, eventName: string): readonly unknown[] {
+  if (!Array.isArray(value)) {
+    throw new TypeError(`Opossum emitted ${eventName} without an argument array.`);
+  }
+  return value;
+}
+
+function assertInstanceMethod(
+  target: object,
+  descriptor: PropertyDescriptor,
+): void {
+  if (typeof target === "function") {
+    throw new TypeError("HTTP circuit handlers can only decorate instance methods.");
+  }
+  if (typeof descriptor.value !== "function") {
+    throw new TypeError("HTTP circuit handlers can only decorate methods.");
+  }
+}
+
+function validateGroup(value: string): string {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new TypeError("HTTP circuit handlers require a non-empty circuitGroup.");
+  }
+  return value;
 }

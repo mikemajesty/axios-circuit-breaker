@@ -121,7 +121,7 @@ describe("HttpCircuitBreaker", () => {
         this.received.push("reject");
       }
 
-      @onHttpCircuitFallback<[string], string>({ circuitGroup: "legacy" })
+      @onHttpCircuitFallback({ circuitGroup: "legacy" })
       useFallback(event: CircuitFallbackEvent<[string]>): string {
         fallbackErrors.push(event.err);
         this.received.push("fallback");
@@ -250,12 +250,14 @@ describe("HttpCircuitBreaker", () => {
     assert.equal(healthyCalls, 1);
   });
 
-  it("counts network errors and HTTP 408, 429, and 5xx as failures", async () => {
+  it("counts transport errors and HTTP 5xx responses as failures", async () => {
     for (const [label, error] of [
       ["network", new AxiosError("network error")],
-      ["408", axiosError(408)],
-      ["429", axiosError(429)],
-      ["5xx", axiosError(503)],
+      ["500", axiosError(500)],
+      ["501", axiosError(501)],
+      ["502", axiosError(502)],
+      ["503", axiosError(503)],
+      ["504", axiosError(504)],
     ] as const) {
       let calls = 0;
 
@@ -274,11 +276,15 @@ describe("HttpCircuitBreaker", () => {
     }
   });
 
-  it("does not count cancellations and other 4xx responses", async () => {
+  it("does not count cancellations or HTTP 1xx–4xx responses", async () => {
     for (const error of [
       new axios.CanceledError(),
+      axiosError(200),
+      axiosError(302),
       axiosError(400),
       axiosError(404),
+      axiosError(408),
+      axiosError(429),
     ]) {
       let calls = 0;
 
@@ -332,7 +338,7 @@ describe("HttpCircuitBreaker", () => {
   });
 
   it("uses shouldCountAsFailure when supplied", async () => {
-    const error = axiosError(400);
+    const error = axiosError(429);
     let calls = 0;
 
     class Client {
@@ -531,7 +537,7 @@ describe("HttpCircuitBreaker", () => {
     const fallbackInputs: (readonly unknown[])[] = [];
 
     class Client {
-      @onHttpCircuitFallback<[string], string>({
+      @onHttpCircuitFallback({
         circuitGroup: "fallback",
       })
       useFallback(event: CircuitFallbackEvent<[string]>): string {
@@ -576,4 +582,162 @@ describe("HttpCircuitBreaker", () => {
       return Client;
     }, /Only one @onHttpCircuitFallback/);
   });
+
+  it("filters a rejection from breaker failures without resolving the caller promise or invoking fallback", async () => {
+    const error = axiosError(404);
+    const events: string[] = [];
+
+    class Client {
+      @onHttpCircuitEvent({ circuitGroup: "filtered", eventName: "success" })
+      onSuccess() {
+        events.push("success");
+      }
+
+      @onHttpCircuitFallback({ circuitGroup: "filtered" })
+      fallback() {
+        events.push("fallback");
+        return "cached";
+      }
+
+      @HttpCircuitBreaker(breakerOptions({ circuitGroup: "filtered" }))
+      async request(): Promise<never> {
+        throw error;
+      }
+    }
+
+    const client = new Client();
+
+    await assert.rejects(client.request(), (received: unknown) => {
+      assert.equal(received, error);
+      return true;
+    });
+    await assert.rejects(client.request(), (received: unknown) => {
+      assert.equal(received, error);
+      return true;
+    });
+
+    assert.deepEqual(events, ["success", "success"]);
+  });
+
+  it("counts the original operation as a failure if error classification throws", async () => {
+    const configurations: Partial<HttpCircuitBreakerOptions<[]>>[] = [
+      {
+        getErrorCause: (_error: unknown): unknown => {
+          throw new Error("cause extraction failed");
+        },
+      },
+      {
+        shouldCountAsFailure: (_error: unknown): boolean => {
+          throw new Error("classification failed");
+        },
+      },
+    ];
+
+    for (const overrides of configurations) {
+      let calls = 0;
+      const originalError = axiosError(404);
+
+      class Client {
+        @HttpCircuitBreaker(breakerOptions(overrides))
+        async request(): Promise<never> {
+          calls += 1;
+          throw originalError;
+        }
+      }
+
+      const client = new Client();
+      await assert.rejects(client.request(), originalError);
+      await assert.rejects(client.request());
+      assert.equal(calls, 1);
+    }
+  });
+
+  it("exposes filtered rejections as unknown success results", async () => {
+    const error = axiosError(404);
+    const results: unknown[] = [];
+
+    class Client {
+      @onHttpCircuitEvent({ circuitGroup: "filtered-result", eventName: "success" })
+      onSuccess(event: { result: unknown }) {
+        results.push(event.result);
+      }
+
+      @HttpCircuitBreaker(breakerOptions({ circuitGroup: "filtered-result" }))
+      async request(): Promise<never> {
+        throw error;
+      }
+    }
+
+    const client = new Client();
+    await assert.rejects(client.request(), error);
+    assert.equal(results[0], error);
+  });
+
+  it("resolves event handlers declared on base classes", async () => {
+    const received: string[] = [];
+
+    class BaseClient {
+      @onHttpCircuitEvent({ circuitGroup: "inherited", eventName: "success" })
+      onSuccess() {
+        received.push("base");
+      }
+    }
+
+    class Client extends BaseClient {
+      @HttpCircuitBreaker(breakerOptions({ circuitGroup: "inherited" }))
+      async request(): Promise<string> {
+        return "ok";
+      }
+    }
+
+    assert.equal(await new Client().request(), "ok");
+    assert.deepEqual(received, ["base"]);
+  });
+
+  it("rejects duplicate fallback handlers across an inheritance chain", async () => {
+    class BaseClient {
+      @onHttpCircuitFallback({ circuitGroup: "inherited-fallback" })
+      baseFallback() {
+        return "base";
+      }
+    }
+
+    class Client extends BaseClient {
+      @onHttpCircuitFallback({ circuitGroup: "inherited-fallback" })
+      childFallback() {
+        return "child";
+      }
+
+      @HttpCircuitBreaker(
+        breakerOptions({ circuitGroup: "inherited-fallback" }),
+      )
+      async request(): Promise<never> {
+        throw axiosError(503);
+      }
+    }
+
+    await assert.rejects(new Client().request(), /Only one @onHttpCircuitFallback/);
+  });
+
+  it("captures Opossum options when the decorator is created", async () => {
+    const mutableOptions = { ...fastTripOptions };
+
+    class Client {
+      @HttpCircuitBreaker({
+        circuitGroup: "options-snapshot",
+        options: mutableOptions,
+      })
+      async request(): Promise<never> {
+        throw axiosError(503);
+      }
+    }
+
+    mutableOptions.volumeThreshold = 100;
+    mutableOptions.errorThresholdPercentage = 100;
+
+    const client = new Client();
+    await assert.rejects(client.request());
+    await assert.rejects(client.request());
+  });
+
 });
